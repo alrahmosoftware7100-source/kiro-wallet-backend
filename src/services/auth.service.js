@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const pool = require('../config/db');
 const {
   ensureUserWallets,
-  getUserWallets,
+  getStoredWallets,
 } = require('./wallet.service');
 
 function normalizePhrase(phrase) {
@@ -61,7 +61,9 @@ async function createWallet(phrase, pin) {
     await client.query('COMMIT');
 
     await ensureUserWallets(user.id);
-    const wallets = await getUserWallets(user.id);
+
+    // مهم: نرجع المحافظ المخزنة فقط بدون live sync
+    const wallets = await getStoredWallets(user.id);
 
     return {
       userId: user.id,
@@ -117,7 +119,9 @@ async function loginWithPhraseAndPin(phrase, pin) {
   }
 
   await ensureUserWallets(user.id);
-  const wallets = await getUserWallets(user.id);
+
+  // مهم: نرجع المحافظ المخزنة فقط بدون live sync
+  const wallets = await getStoredWallets(user.id);
 
   return {
     userId: user.id,

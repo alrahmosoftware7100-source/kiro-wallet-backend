@@ -347,6 +347,18 @@ async function getWalletBalance(userId) {
   return syncWalletBalances(userId);
 }
 
+async function getStoredWallets(userId) {
+  const result = await pool.query(
+    `SELECT id, user_id, asset, network, address, balance
+     FROM public.wallets
+     WHERE user_id = $1
+     ORDER BY id ASC`,
+    [userId]
+  );
+
+  return result.rows;
+}
+
 async function getWalletWithSecret(userId, network) {
   const result = await pool.query(
     `SELECT id, user_id, asset, network, address, balance,
@@ -804,7 +816,7 @@ async function getTransactions(userId) {
 
   const walletsResult = await pool.query(
     `SELECT id, asset, network, address
-     FROM wallets
+     FROM public.wallets
      WHERE user_id = $1
      ORDER BY id ASC`,
     [userId]
@@ -814,7 +826,7 @@ async function getTransactions(userId) {
 
   const dbTransactionsResult = await pool.query(
     `SELECT id, type, amount, status, note, created_at
-     FROM transactions
+     FROM public.transactions
      WHERE user_id = $1
      ORDER BY created_at DESC
      LIMIT 20`,
@@ -845,7 +857,7 @@ async function getTransactions(userId) {
 async function getUserDecryptedWalletSecrets(userId) {
   const result = await pool.query(
     `SELECT id, asset, network, address, private_key_encrypted, private_key_iv, private_key_tag
-     FROM wallets
+     FROM public.wallets
      WHERE user_id = $1
      ORDER BY id ASC`,
     [userId]
@@ -868,6 +880,7 @@ module.exports = {
   ensureUserWallets,
   getUserWallets,
   getWalletBalance,
+  getStoredWallets,
   sendAmount,
   sendUSDT_TRC20,
   sendUSDT_ERC20,
