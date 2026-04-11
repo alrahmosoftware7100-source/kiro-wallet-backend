@@ -39,7 +39,7 @@ async function createWallet(phrase, pin) {
 
     const existingUserResult = await client.query(
       `SELECT id
-       FROM users
+       FROM public.users
        WHERE phrase_hash = $1
        LIMIT 1`,
       [phraseHash]
@@ -50,7 +50,7 @@ async function createWallet(phrase, pin) {
     }
 
     const userResult = await client.query(
-      `INSERT INTO users (phrase_hash, pin_hash, status)
+      `INSERT INTO public.users (phrase_hash, pin_hash, status)
        VALUES ($1, $2, 'active')
        RETURNING id, created_at`,
       [phraseHash, pinHash]
@@ -88,7 +88,7 @@ async function loginWithPhraseAndPin(phrase, pin) {
 
   const userResult = await pool.query(
     `SELECT id, pin_hash, status
-     FROM users
+     FROM public.users
      WHERE phrase_hash = $1
      LIMIT 1`,
     [phraseHash]

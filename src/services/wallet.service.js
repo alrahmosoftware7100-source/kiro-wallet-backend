@@ -132,7 +132,7 @@ async function insertWallet(client, userId, walletData) {
   const encrypted = encryptText(walletData.privateKey);
 
   const result = await client.query(
-    `INSERT INTO wallets
+    `INSERT INTO public.wallets
       (user_id, asset, network, address, balance, private_key_encrypted, private_key_iv, private_key_tag)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
      RETURNING id, user_id, asset, network, address, balance`,
@@ -159,7 +159,7 @@ async function ensureUserWallets(userId) {
 
     const existingResult = await client.query(
       `SELECT id, asset, network, address, balance
-       FROM wallets
+       FROM public.wallets
        WHERE user_id = $1
        ORDER BY id ASC`,
       [userId]
@@ -310,7 +310,7 @@ async function syncWalletBalances(userId) {
 
   const result = await pool.query(
     `SELECT id, user_id, asset, network, address, balance
-     FROM wallets
+     FROM public.wallets
      WHERE user_id = $1
      ORDER BY id ASC`,
     [userId]
@@ -323,7 +323,7 @@ async function syncWalletBalances(userId) {
       const liveBalance = await getLiveBalanceForWallet(wallet);
 
       await pool.query(
-        `UPDATE wallets
+        `UPDATE public.wallets
          SET balance = $1
          WHERE id = $2`,
         [liveBalance, wallet.id]
@@ -351,7 +351,7 @@ async function getWalletWithSecret(userId, network) {
   const result = await pool.query(
     `SELECT id, user_id, asset, network, address, balance,
             private_key_encrypted, private_key_iv, private_key_tag
-     FROM wallets
+     FROM public.wallets
      WHERE user_id = $1 AND network = $2
      LIMIT 1`,
     [userId, network]
@@ -368,7 +368,7 @@ async function createTransactionRecord({
   note,
 }) {
   await pool.query(
-    `INSERT INTO transactions (user_id, type, amount, status, note)
+    `INSERT INTO public.transactions (user_id, type, amount, status, note)
      VALUES ($1, $2, $3, $4, $5)`,
     [userId, type, amount, status, note]
   );
