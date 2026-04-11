@@ -1,0 +1,39 @@
+{
+  "name": "kiro-wallet-backend",
+  "version": "1.0.0",
+  "description": "Kiro Wallet Backend API",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon src/server.js",
+    "start": "node src/server.js",
+    "prod": "NODE_ENV=production node src/server.js"
+  },
+  "keywords": [
+    "wallet",
+    "crypto",
+    "api",
+    "kiro"
+  ],
+  "author": "Kiro Wallet",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "axios": "^1.15.0",
+    "bcrypt": "^6.0.0",
+    "bip39": "^3.1.0",
+    "bitcoinjs-lib": "^7.0.1",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "ecpair": "^3.0.1",
+    "ethers": "^6.16.0",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "node-fetch": "^3.3.2",
+    "pg": "^8.20.0",
+    "tiny-secp256k1": "^2.2.4",
+    "tronweb": "^6.2.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
