@@ -8,6 +8,12 @@ async function createWalletController(req, res) {
   try {
     const { phrase, pin } = req.body || {};
 
+    console.log('CREATE WALLET REQUEST RECEIVED');
+    console.log('BODY:', {
+      phrase: phrase ? '[provided]' : '[missing]',
+      pin: pin ? '[provided]' : '[missing]',
+    });
+
     if (!phrase || !phrase.trim()) {
       return res.status(400).json({
         success: false,
@@ -30,6 +36,10 @@ async function createWalletController(req, res) {
       data: result,
     });
   } catch (error) {
+    console.error('CREATE WALLET ERROR:', error);
+    console.error('CREATE WALLET ERROR MESSAGE:', error?.message);
+    console.error('CREATE WALLET ERROR STACK:', error?.stack);
+
     return res.status(400).json({
       success: false,
       message: error.message,
@@ -40,6 +50,12 @@ async function createWalletController(req, res) {
 async function loginController(req, res) {
   try {
     const { phrase, pin } = req.body || {};
+
+    console.log('LOGIN REQUEST RECEIVED');
+    console.log('BODY:', {
+      phrase: phrase ? '[provided]' : '[missing]',
+      pin: pin ? '[provided]' : '[missing]',
+    });
 
     if (!phrase || !phrase.trim()) {
       return res.status(400).json({
@@ -66,6 +82,10 @@ async function loginController(req, res) {
       data: result,
     });
   } catch (error) {
+    console.error('LOGIN ERROR:', error);
+    console.error('LOGIN ERROR MESSAGE:', error?.message);
+    console.error('LOGIN ERROR STACK:', error?.stack);
+
     return res.status(400).json({
       success: false,
       message: error.message,
