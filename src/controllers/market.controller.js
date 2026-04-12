@@ -1,4 +1,5 @@
-const fetch = require('node-fetch');
+const fetch = (...args) =>
+  import('node-fetch').then(({ default: fetch }) => fetch(...args))
 
 const COINGECKO_BASE_URL =
   process.env.COINGECKO_BASE_URL || 'https://api.coingecko.com/api/v3';
