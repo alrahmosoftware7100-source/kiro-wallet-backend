@@ -1,12 +1,8 @@
-const fetch = (...args) =>
-  import('node-fetch').then(({ default: fetch }) => fetch(...args))
+const axios = require('axios');
 
 const COINGECKO_BASE_URL =
   process.env.COINGECKO_BASE_URL || 'https://api.coingecko.com/api/v3';
 
-const COINS_MARKETS_URL = `${COINGECKO_BASE_URL}/coins/markets`;
-
-// Cache بسيط لتخفيف الضغط على API
 let coinsCache = {
   data: null,
   expiresAt: 0,
@@ -29,60 +25,43 @@ function mapCoin(coin) {
     circulatingSupply: coin.circulating_supply ?? 0,
     totalSupply: coin.total_supply ?? 0,
     maxSupply: coin.max_supply ?? 0,
-    ath: coin.ath ?? 0,
-    athChangePercentage: coin.ath_change_percentage ?? 0,
-    athDate: coin.ath_date,
-    atl: coin.atl ?? 0,
-    atlChangePercentage: coin.atl_change_percentage ?? 0,
-    atlDate: coin.atl_date,
     lastUpdated: coin.last_updated,
   };
 }
 
 async function fetchTopCoins() {
-  const url = new URL(COINS_MARKETS_URL);
-
-  url.searchParams.set('vs_currency', 'usd');
-  url.searchParams.set('order', 'market_cap_desc');
-  url.searchParams.set('per_page', '200');
-  url.searchParams.set('page', '1');
-  url.searchParams.set('sparkline', 'false');
-  url.searchParams.set('price_change_percentage', '24h');
-
   const headers = {
     accept: 'application/json',
   };
 
-  // إذا عندك API key لاحقًا
   if (process.env.COINGECKO_API_KEY) {
     headers['x-cg-demo-api-key'] = process.env.COINGECKO_API_KEY;
   }
 
-  const response = await fetch(url.toString(), {
-    method: 'GET',
+  const response = await axios.get(`${COINGECKO_BASE_URL}/coins/markets`, {
     headers,
     timeout: 20000,
+    params: {
+      vs_currency: 'usd',
+      order: 'market_cap_desc',
+      per_page: 200,
+      page: 1,
+      sparkline: false,
+      price_change_percentage: '24h',
+    },
   });
 
-  if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(`CoinGecko HTTP ${response.status}: ${text || 'Request failed'}`);
-  }
-
-  const data = await response.json();
-
-  if (!Array.isArray(data)) {
+  if (!Array.isArray(response.data)) {
     throw new Error('Invalid coins response format');
   }
 
-  return data.map(mapCoin);
+  return response.data.map(mapCoin);
 }
 
 async function getCoins(req, res) {
   try {
     const now = Date.now();
 
-    // cache لمدة 60 ثانية
     if (coinsCache.data && now < coinsCache.expiresAt) {
       return res.status(200).json({
         success: true,
@@ -106,9 +85,8 @@ async function getCoins(req, res) {
       data: coins,
     });
   } catch (error) {
-    console.error('getCoins error:', error.message);
+    console.error('getCoins error:', error.response?.data || error.message);
 
-    // fallback: إذا في cache قديم رجّعه بدل 500
     if (coinsCache.data) {
       return res.status(200).json({
         success: true,
@@ -123,7 +101,7 @@ async function getCoins(req, res) {
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch market coins',
-      error: error.message,
+      error: error.response?.data || error.message,
     });
   }
 }
