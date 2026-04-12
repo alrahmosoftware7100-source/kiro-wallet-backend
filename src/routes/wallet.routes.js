@@ -3,6 +3,7 @@ const authMiddleware = require('../middlewares/auth.middleware');
 
 const {
   getBalanceController,
+  refreshWalletBalancesController,
   createWalletsController,
   sendController,
   getTransactionsController,
@@ -24,6 +25,12 @@ const {
 const router = express.Router();
 
 router.get('/wallets', authMiddleware, walletReadLimiter, getBalanceController);
+router.get(
+  '/wallets/refresh',
+  authMiddleware,
+  walletReadLimiter,
+  refreshWalletBalancesController
+);
 
 router.post('/wallets/create', authMiddleware, walletReadLimiter, createWalletsController);
 

@@ -1,8 +1,9 @@
 const {
   ensureUserWallets,
-  getUserWallets,
+  getStoredWallets,
   sendAmount,
   getTransactions,
+  syncWalletBalances,
 } = require('../services/wallet.service');
 
 async function getBalanceController(req, res) {
@@ -10,7 +11,7 @@ async function getBalanceController(req, res) {
     const userId = req.user.userId;
 
     await ensureUserWallets(userId);
-    const wallets = await getUserWallets(userId);
+    const wallets = await getStoredWallets(userId);
 
     return res.status(200).json({
       success: true,
@@ -21,6 +22,25 @@ async function getBalanceController(req, res) {
     return res.status(500).json({
       success: false,
       message: error.message || 'Failed to fetch wallets',
+    });
+  }
+}
+
+async function refreshWalletBalancesController(req, res) {
+  try {
+    const userId = req.user.userId;
+
+    const wallets = await syncWalletBalances(userId);
+
+    return res.status(200).json({
+      success: true,
+      message: 'Wallet balances refreshed successfully',
+      data: wallets,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to refresh wallet balances',
     });
   }
 }
@@ -103,6 +123,7 @@ async function getTransactionsController(req, res) {
 
 module.exports = {
   getBalanceController,
+  refreshWalletBalancesController,
   createWalletsController,
   sendController,
   getTransactionsController,
