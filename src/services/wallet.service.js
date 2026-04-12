@@ -49,6 +49,19 @@ const ERC20_ABI = [
   'function transfer(address to, uint256 value) returns (bool)',
 ];
 
+const TX_STATUS = {
+  PENDING: 'pending',
+  CONFIRMED: 'confirmed',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+};
+
+function createHttpError(message, statusCode = 400) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
 function encryptText(plainText) {
   const iv = crypto.randomBytes(12);
   const key = Buffer.from(WALLET_ENCRYPTION_KEY, 'hex');
@@ -206,9 +219,45 @@ function safeNumber(value, fallback = 0) {
 function parsePositiveAmount(amount) {
   const parsed = Number(amount);
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error('Amount must be greater than 0');
+    throw createHttpError('Amount must be greater than 0', 400);
   }
   return parsed;
+}
+
+function normalizeNetwork(network) {
+  return String(network || 'TRC20').trim().toUpperCase();
+}
+
+function normalizeAsset(asset, network) {
+  if (network === 'BTC') return 'BTC';
+  return String(asset || 'USDT').trim().toUpperCase();
+}
+
+function normalizeNote(note) {
+  const value = String(note || '').trim();
+  return value.slice(0, 250);
+}
+
+function buildTxNote({
+  note,
+  toAddress,
+  network,
+  txHash = '',
+  feeText = '',
+  idempotencyKey = '',
+}) {
+  const base = note || `${network} transfer`;
+  const parts = [
+    base,
+    `-> ${toAddress}`,
+    `[${network}]`,
+  ];
+
+  if (txHash) parts.push(`tx:${txHash}`);
+  if (feeText) parts.push(`fee:${feeText}`);
+  if (idempotencyKey) parts.push(`idem:${idempotencyKey}`);
+
+  return parts.join(' ');
 }
 
 function toTrc20BaseUnits(amount) {
@@ -359,191 +408,484 @@ async function getStoredWallets(userId) {
   return result.rows;
 }
 
-async function getWalletWithSecret(userId, network) {
-  const result = await pool.query(
+async function getWalletWithSecretByClient(client, userId, network) {
+  const result = await client.query(
     `SELECT id, user_id, asset, network, address, balance,
             private_key_encrypted, private_key_iv, private_key_tag
      FROM public.wallets
      WHERE user_id = $1 AND network = $2
-     LIMIT 1`,
+     LIMIT 1
+     FOR UPDATE`,
     [userId, network]
   );
 
   return result.rows[0] || null;
 }
 
-async function createTransactionRecord({
-  userId,
-  type,
-  amount,
-  status,
-  note,
-}) {
-  await pool.query(
+async function createTransactionRecordByClient(
+  client,
+  { userId, type, amount, status, note }
+) {
+  const result = await client.query(
     `INSERT INTO public.transactions (user_id, type, amount, status, note)
-     VALUES ($1, $2, $3, $4, $5)`,
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id, user_id, type, amount, status, note, created_at`,
     [userId, type, amount, status, note]
   );
+
+  return result.rows[0];
 }
 
-async function sendUSDT_TRC20(userId, toAddress, amount, note = '') {
-  if (!toAddress || !String(toAddress).trim()) {
-    throw new Error('Destination address is required');
-  }
-
-  const cleanToAddress = String(toAddress).trim();
-
-  if (!tronWeb.isAddress(cleanToAddress)) {
-    throw new Error('Invalid TRC20 address');
-  }
-
-  const sendValue = parsePositiveAmount(amount);
-
-  await ensureUserWallets(userId);
-  await syncWalletBalances(userId);
-
-  const wallet = await getWalletWithSecret(userId, 'TRC20');
-
-  if (!wallet) {
-    throw new Error('TRC20 wallet not found');
-  }
-
-  const currentBalance = safeNumber(wallet.balance, 0);
-
-  if (currentBalance < sendValue) {
-    throw new Error('Insufficient USDT balance');
-  }
-
-  const privateKey = decryptText(
-    wallet.private_key_encrypted,
-    wallet.private_key_iv,
-    wallet.private_key_tag
+async function updateTransactionRecordByClient(
+  client,
+  transactionId,
+  { status, note }
+) {
+  const result = await client.query(
+    `UPDATE public.transactions
+     SET status = $1,
+         note = $2
+     WHERE id = $3
+     RETURNING id, user_id, type, amount, status, note, created_at`,
+    [status, note, transactionId]
   );
 
-  const tronWebWithKey = new TronWeb({
-    fullHost: TRON_FULL_HOST,
-    privateKey,
-  });
-
-  const contract = await tronWebWithKey.contract().at(TRON_USDT_CONTRACT);
-  const amountInBaseUnits = toTrc20BaseUnits(sendValue);
-
-  let txHash = '';
-
-  try {
-    txHash = await contract.transfer(cleanToAddress, amountInBaseUnits).send({
-      feeLimit: 100000000,
-    });
-  } catch (error) {
-    throw new Error(
-      error?.message ||
-        'TRC20 transfer failed. Make sure the wallet has enough TRX for fees.'
-    );
-  }
-
-  const refreshedWallets = await syncWalletBalances(userId);
-  const refreshedTrc20Wallet = refreshedWallets.find(
-    (item) => item.network === 'TRC20'
-  );
-
-  await createTransactionRecord({
-    userId,
-    type: 'send',
-    amount: sendValue,
-    status: 'completed',
-    note: `${note || 'TRC20 transfer'} -> ${cleanToAddress} [TRC20] tx:${txHash}`,
-  });
-
-  return {
-    balance: refreshedTrc20Wallet?.balance ?? 0,
-    sentAmount: sendValue,
-    network: 'TRC20',
-    toAddress: cleanToAddress,
-    txHash,
-  };
+  return result.rows[0] || null;
 }
 
-async function sendUSDT_ERC20(userId, toAddress, amount, note = '') {
-  if (!toAddress || !String(toAddress).trim()) {
-    throw new Error('Destination address is required');
+async function findRecentDuplicateByClient(
+  client,
+  userId,
+  idempotencyKey,
+  amount,
+  network,
+  toAddress
+) {
+  if (!idempotencyKey) return null;
+
+  const result = await client.query(
+    `SELECT id, type, amount, status, note, created_at
+     FROM public.transactions
+     WHERE user_id = $1
+       AND amount = $2
+       AND created_at >= NOW() - INTERVAL '10 minutes'
+       AND note ILIKE $3
+       AND note ILIKE $4
+       AND note ILIKE $5
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [
+      userId,
+      amount,
+      `%idem:${idempotencyKey}%`,
+      `%[${network}]%`,
+      `%-> ${toAddress}%`,
+    ]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function syncSingleWalletBalance(client, walletId, network, address) {
+  let liveBalance = 0;
+
+  if (network === 'ERC20') {
+    liveBalance = await getErc20UsdtBalance(address);
+  } else if (network === 'TRC20') {
+    liveBalance = await getTrc20UsdtBalance(address);
+  } else if (network === 'BTC') {
+    liveBalance = await getBtcBalance(address);
   }
 
-  const cleanToAddress = String(toAddress).trim();
+  await client.query(
+    `UPDATE public.wallets
+     SET balance = $1
+     WHERE id = $2`,
+    [liveBalance, walletId]
+  );
 
-  if (!ethers.isAddress(cleanToAddress)) {
-    throw new Error('Invalid ERC20 address');
-  }
+  return liveBalance;
+}
 
-  const sendValue = parsePositiveAmount(amount);
-
+async function prepareSendContext(client, userId, asset, network) {
   await ensureUserWallets(userId);
-  await syncWalletBalances(userId);
 
-  const walletRow = await getWalletWithSecret(userId, 'ERC20');
+  const walletRow = await getWalletWithSecretByClient(client, userId, network);
 
   if (!walletRow) {
-    throw new Error('ERC20 wallet not found');
+    throw createHttpError(`${network} wallet not found`, 404);
   }
 
-  const currentBalance = safeNumber(walletRow.balance, 0);
-
-  if (currentBalance < sendValue) {
-    throw new Error('Insufficient USDT balance');
-  }
-
-  const privateKey = decryptText(
-    walletRow.private_key_encrypted,
-    walletRow.private_key_iv,
-    walletRow.private_key_tag
+  const liveBalance = await syncSingleWalletBalance(
+    client,
+    walletRow.id,
+    walletRow.network,
+    walletRow.address
   );
 
-  const signer = new ethers.Wallet(privateKey, ethProvider);
+  walletRow.balance = liveBalance;
 
-  const nativeBalance = await ethProvider.getBalance(walletRow.address);
-  if (nativeBalance <= 0n) {
-    throw new Error('Not enough ETH for gas fees');
+  const normalizedAsset = normalizeAsset(asset, network);
+
+  if (network !== 'BTC' && normalizedAsset !== 'USDT') {
+    throw createHttpError('Unsupported asset for selected network', 400);
   }
 
-  const contract = new ethers.Contract(ETH_USDT_CONTRACT, ERC20_ABI, signer);
+  if (network === 'BTC' && normalizedAsset !== 'BTC') {
+    throw createHttpError('BTC network only supports BTC asset', 400);
+  }
 
-  let decimals = 6;
+  return walletRow;
+}
+
+async function sendUSDT_TRC20({
+  userId,
+  asset,
+  toAddress,
+  amount,
+  note = '',
+  idempotencyKey = '',
+}) {
+  const cleanToAddress = String(toAddress || '').trim();
+  if (!cleanToAddress) {
+    throw createHttpError('Destination address is required', 400);
+  }
+
+  if (!tronWeb.isAddress(cleanToAddress)) {
+    throw createHttpError('Invalid TRC20 address', 400);
+  }
+
+  const sendValue = parsePositiveAmount(amount);
+  const cleanNote = normalizeNote(note);
+
+  const client = await pool.connect();
+
   try {
-    decimals = Number(await contract.decimals());
-  } catch (_) {}
+    await client.query('BEGIN');
 
-  const amountInBaseUnits = toErc20BaseUnits(sendValue, decimals);
+    const duplicate = await findRecentDuplicateByClient(
+      client,
+      userId,
+      idempotencyKey,
+      sendValue,
+      'TRC20',
+      cleanToAddress
+    );
 
-  let tx;
-  try {
-    tx = await contract.transfer(cleanToAddress, amountInBaseUnits);
+    if (duplicate) {
+      await client.query('ROLLBACK');
+      throw createHttpError('Duplicate transfer request detected', 409);
+    }
+
+    const wallet = await prepareSendContext(client, userId, asset, 'TRC20');
+    const currentBalance = safeNumber(wallet.balance, 0);
+
+    if (currentBalance < sendValue) {
+      await client.query('ROLLBACK');
+      throw createHttpError('Insufficient USDT balance', 400);
+    }
+
+    const pendingTx = await createTransactionRecordByClient(client, {
+      userId,
+      type: 'send',
+      amount: sendValue,
+      status: TX_STATUS.PENDING,
+      note: buildTxNote({
+        note: cleanNote || 'TRC20 transfer',
+        toAddress: cleanToAddress,
+        network: 'TRC20',
+        idempotencyKey,
+      }),
+    });
+
+    await client.query('COMMIT');
+
+    const privateKey = decryptText(
+      wallet.private_key_encrypted,
+      wallet.private_key_iv,
+      wallet.private_key_tag
+    );
+
+    const tronWebWithKey = new TronWeb({
+      fullHost: TRON_FULL_HOST,
+      privateKey,
+    });
+
+    const contract = await tronWebWithKey.contract().at(TRON_USDT_CONTRACT);
+    const amountInBaseUnits = toTrc20BaseUnits(sendValue);
+
+    let txHash = '';
+    try {
+      txHash = await contract.transfer(cleanToAddress, amountInBaseUnits).send({
+        feeLimit: 100000000,
+      });
+    } catch (error) {
+      const failClient = await pool.connect();
+      try {
+        await failClient.query('BEGIN');
+        await updateTransactionRecordByClient(failClient, pendingTx.id, {
+          status: TX_STATUS.FAILED,
+          note: buildTxNote({
+            note: cleanNote || 'TRC20 transfer failed',
+            toAddress: cleanToAddress,
+            network: 'TRC20',
+            idempotencyKey,
+          }),
+        });
+        await failClient.query('COMMIT');
+      } catch (dbError) {
+        await failClient.query('ROLLBACK');
+      } finally {
+        failClient.release();
+      }
+
+      throw createHttpError(
+        error?.message ||
+          'TRC20 transfer failed. Make sure the wallet has enough TRX for fees.',
+        400
+      );
+    }
+
+    const doneClient = await pool.connect();
+    try {
+      await doneClient.query('BEGIN');
+
+      const latestBalance = await getTrc20UsdtBalance(wallet.address);
+      await doneClient.query(
+        `UPDATE public.wallets
+         SET balance = $1
+         WHERE id = $2`,
+        [latestBalance, wallet.id]
+      );
+
+      const finalTx = await updateTransactionRecordByClient(doneClient, pendingTx.id, {
+        status: TX_STATUS.PENDING,
+        note: buildTxNote({
+          note: cleanNote || 'TRC20 transfer',
+          toAddress: cleanToAddress,
+          network: 'TRC20',
+          txHash,
+          idempotencyKey,
+        }),
+      });
+
+      await doneClient.query('COMMIT');
+
+      return {
+        transactionId: finalTx?.id || pendingTx.id,
+        balance: latestBalance,
+        sentAmount: sendValue,
+        asset: 'USDT',
+        network: 'TRC20',
+        toAddress: cleanToAddress,
+        txHash,
+        status: TX_STATUS.PENDING,
+      };
+    } catch (dbError) {
+      await doneClient.query('ROLLBACK');
+      throw dbError;
+    } finally {
+      doneClient.release();
+    }
   } catch (error) {
-    throw new Error(error?.reason || error?.message || 'ERC20 transfer failed');
+    try {
+      await client.query('ROLLBACK');
+    } catch (_) {}
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function sendUSDT_ERC20({
+  userId,
+  asset,
+  toAddress,
+  amount,
+  note = '',
+  idempotencyKey = '',
+}) {
+  const cleanToAddress = String(toAddress || '').trim();
+  if (!cleanToAddress) {
+    throw createHttpError('Destination address is required', 400);
   }
 
-  const receipt = await tx.wait();
+  if (!ethers.isAddress(cleanToAddress)) {
+    throw createHttpError('Invalid ERC20 address', 400);
+  }
 
-  const refreshedWallets = await syncWalletBalances(userId);
-  const refreshedErc20Wallet = refreshedWallets.find(
-    (item) => item.network === 'ERC20'
-  );
+  const sendValue = parsePositiveAmount(amount);
+  const cleanNote = normalizeNote(note);
 
-  await createTransactionRecord({
-    userId,
-    type: 'send',
-    amount: sendValue,
-    status: receipt?.status === 1 ? 'completed' : 'failed',
-    note: `${note || 'ERC20 transfer'} -> ${cleanToAddress} [ERC20] tx:${tx.hash}`,
-  });
+  const client = await pool.connect();
 
-  return {
-    balance: refreshedErc20Wallet?.balance ?? 0,
-    sentAmount: sendValue,
-    network: 'ERC20',
-    toAddress: cleanToAddress,
-    txHash: tx.hash,
-    blockNumber: receipt?.blockNumber || null,
-    status: receipt?.status === 1 ? 'completed' : 'failed',
-  };
+  try {
+    await client.query('BEGIN');
+
+    const duplicate = await findRecentDuplicateByClient(
+      client,
+      userId,
+      idempotencyKey,
+      sendValue,
+      'ERC20',
+      cleanToAddress
+    );
+
+    if (duplicate) {
+      await client.query('ROLLBACK');
+      throw createHttpError('Duplicate transfer request detected', 409);
+    }
+
+    const walletRow = await prepareSendContext(client, userId, asset, 'ERC20');
+    const currentBalance = safeNumber(walletRow.balance, 0);
+
+    if (currentBalance < sendValue) {
+      await client.query('ROLLBACK');
+      throw createHttpError('Insufficient USDT balance', 400);
+    }
+
+    const pendingTx = await createTransactionRecordByClient(client, {
+      userId,
+      type: 'send',
+      amount: sendValue,
+      status: TX_STATUS.PENDING,
+      note: buildTxNote({
+        note: cleanNote || 'ERC20 transfer',
+        toAddress: cleanToAddress,
+        network: 'ERC20',
+        idempotencyKey,
+      }),
+    });
+
+    await client.query('COMMIT');
+
+    const privateKey = decryptText(
+      walletRow.private_key_encrypted,
+      walletRow.private_key_iv,
+      walletRow.private_key_tag
+    );
+
+    const signer = new ethers.Wallet(privateKey, ethProvider);
+
+    const nativeBalance = await ethProvider.getBalance(walletRow.address);
+    if (nativeBalance <= 0n) {
+      const failClient = await pool.connect();
+      try {
+        await failClient.query('BEGIN');
+        await updateTransactionRecordByClient(failClient, pendingTx.id, {
+          status: TX_STATUS.FAILED,
+          note: buildTxNote({
+            note: cleanNote || 'ERC20 transfer failed',
+            toAddress: cleanToAddress,
+            network: 'ERC20',
+            idempotencyKey,
+          }),
+        });
+        await failClient.query('COMMIT');
+      } catch (_) {
+        await failClient.query('ROLLBACK');
+      } finally {
+        failClient.release();
+      }
+
+      throw createHttpError('Not enough ETH for gas fees', 400);
+    }
+
+    const contract = new ethers.Contract(ETH_USDT_CONTRACT, ERC20_ABI, signer);
+
+    let decimals = 6;
+    try {
+      decimals = Number(await contract.decimals());
+    } catch (_) {}
+
+    const amountInBaseUnits = toErc20BaseUnits(sendValue, decimals);
+
+    let tx;
+    let receipt;
+
+    try {
+      tx = await contract.transfer(cleanToAddress, amountInBaseUnits);
+      receipt = await tx.wait();
+    } catch (error) {
+      const failClient = await pool.connect();
+      try {
+        await failClient.query('BEGIN');
+        await updateTransactionRecordByClient(failClient, pendingTx.id, {
+          status: TX_STATUS.FAILED,
+          note: buildTxNote({
+            note: cleanNote || 'ERC20 transfer failed',
+            toAddress: cleanToAddress,
+            network: 'ERC20',
+            txHash: tx?.hash || '',
+            idempotencyKey,
+          }),
+        });
+        await failClient.query('COMMIT');
+      } catch (_) {
+        await failClient.query('ROLLBACK');
+      } finally {
+        failClient.release();
+      }
+
+      throw createHttpError(
+        error?.reason || error?.message || 'ERC20 transfer failed',
+        400
+      );
+    }
+
+    const finalStatus =
+      receipt?.status === 1 ? TX_STATUS.CONFIRMED : TX_STATUS.FAILED;
+
+    const doneClient = await pool.connect();
+    try {
+      await doneClient.query('BEGIN');
+
+      const latestBalance = await getErc20UsdtBalance(walletRow.address);
+      await doneClient.query(
+        `UPDATE public.wallets
+         SET balance = $1
+         WHERE id = $2`,
+        [latestBalance, walletRow.id]
+      );
+
+      const finalTx = await updateTransactionRecordByClient(doneClient, pendingTx.id, {
+        status: finalStatus,
+        note: buildTxNote({
+          note: cleanNote || 'ERC20 transfer',
+          toAddress: cleanToAddress,
+          network: 'ERC20',
+          txHash: tx.hash,
+          idempotencyKey,
+        }),
+      });
+
+      await doneClient.query('COMMIT');
+
+      return {
+        transactionId: finalTx?.id || pendingTx.id,
+        balance: latestBalance,
+        sentAmount: sendValue,
+        asset: 'USDT',
+        network: 'ERC20',
+        toAddress: cleanToAddress,
+        txHash: tx.hash,
+        blockNumber: receipt?.blockNumber || null,
+        status: finalStatus,
+      };
+    } catch (dbError) {
+      await doneClient.query('ROLLBACK');
+      throw dbError;
+    } finally {
+      doneClient.release();
+    }
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (_) {}
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function fetchJson(url, options = {}) {
@@ -613,7 +955,7 @@ function selectBtcUtxos(utxos, targetAmountSats, feeRate) {
     }
   }
 
-  throw new Error('Insufficient BTC balance for amount + network fee');
+  throw createHttpError('Insufficient BTC balance for amount + network fee', 400);
 }
 
 async function broadcastBtcTransaction(rawHex) {
@@ -626,148 +968,295 @@ async function broadcastBtcTransaction(rawHex) {
   });
 }
 
-async function sendBTC(userId, toAddress, amount, note = '') {
-  if (!toAddress || !String(toAddress).trim()) {
-    throw new Error('Destination address is required');
+async function sendBTC({
+  userId,
+  asset,
+  toAddress,
+  amount,
+  note = '',
+  idempotencyKey = '',
+}) {
+  const cleanToAddress = String(toAddress || '').trim();
+  if (!cleanToAddress) {
+    throw createHttpError('Destination address is required', 400);
   }
-
-  const cleanToAddress = String(toAddress).trim();
 
   try {
     bitcoin.address.toOutputScript(cleanToAddress, BTC_NETWORK);
   } catch (_) {
-    throw new Error('Invalid BTC address');
+    throw createHttpError('Invalid BTC address', 400);
   }
 
   const sendValue = parsePositiveAmount(amount);
   const amountSats = toBtcSatoshis(sendValue);
+  const cleanNote = normalizeNote(note);
 
-  await ensureUserWallets(userId);
-  await syncWalletBalances(userId);
+  const client = await pool.connect();
 
-  const walletRow = await getWalletWithSecret(userId, 'BTC');
+  try {
+    await client.query('BEGIN');
 
-  if (!walletRow) {
-    throw new Error('BTC wallet not found');
-  }
+    const duplicate = await findRecentDuplicateByClient(
+      client,
+      userId,
+      idempotencyKey,
+      sendValue,
+      'BTC',
+      cleanToAddress
+    );
 
-  const currentBalance = safeNumber(walletRow.balance, 0);
-  if (currentBalance < sendValue) {
-    throw new Error('Insufficient BTC balance');
-  }
+    if (duplicate) {
+      await client.query('ROLLBACK');
+      throw createHttpError('Duplicate transfer request detected', 409);
+    }
 
-  const privateKey = decryptText(
-    walletRow.private_key_encrypted,
-    walletRow.private_key_iv,
-    walletRow.private_key_tag
-  );
+    const walletRow = await prepareSendContext(client, userId, asset, 'BTC');
+    const currentBalance = safeNumber(walletRow.balance, 0);
 
-  const keyPair = ECPair.fromWIF(privateKey, BTC_NETWORK);
+    if (currentBalance < sendValue) {
+      await client.query('ROLLBACK');
+      throw createHttpError('Insufficient BTC balance', 400);
+    }
 
-  const senderPayment = bitcoin.payments.p2wpkh({
-    pubkey: Buffer.from(keyPair.publicKey),
-    network: BTC_NETWORK,
-  });
-
-  if (!senderPayment.address || senderPayment.address !== walletRow.address) {
-    throw new Error('BTC wallet key mismatch');
-  }
-
-  const utxos = await getBtcUtxos(walletRow.address);
-
-  if (!Array.isArray(utxos) || utxos.length === 0) {
-    throw new Error('No spendable BTC UTXOs found');
-  }
-
-  const feeRate = await getBtcRecommendedFeeRate();
-  const { selected, total, fee } = selectBtcUtxos(utxos, amountSats, feeRate);
-
-  const change = total - amountSats - fee;
-
-  if (change < 0) {
-    throw new Error('Insufficient BTC balance after fee calculation');
-  }
-
-  const psbt = new bitcoin.Psbt({ network: BTC_NETWORK });
-
-  for (const utxo of selected) {
-    psbt.addInput({
-      hash: utxo.txid,
-      index: utxo.vout,
-      witnessUtxo: {
-        script: senderPayment.output,
-        value: safeNumber(utxo.value, 0),
-      },
+    const pendingTx = await createTransactionRecordByClient(client, {
+      userId,
+      type: 'send',
+      amount: sendValue,
+      status: TX_STATUS.PENDING,
+      note: buildTxNote({
+        note: cleanNote || 'BTC transfer',
+        toAddress: cleanToAddress,
+        network: 'BTC',
+        idempotencyKey,
+      }),
     });
-  }
 
-  psbt.addOutput({
-    address: cleanToAddress,
-    value: amountSats,
-  });
+    await client.query('COMMIT');
 
-  const dustLimit = 546;
+    const privateKey = decryptText(
+      walletRow.private_key_encrypted,
+      walletRow.private_key_iv,
+      walletRow.private_key_tag
+    );
 
-  if (change >= dustLimit) {
+    const keyPair = ECPair.fromWIF(privateKey, BTC_NETWORK);
+
+    const senderPayment = bitcoin.payments.p2wpkh({
+      pubkey: Buffer.from(keyPair.publicKey),
+      network: BTC_NETWORK,
+    });
+
+    if (!senderPayment.address || senderPayment.address !== walletRow.address) {
+      const failClient = await pool.connect();
+      try {
+        await failClient.query('BEGIN');
+        await updateTransactionRecordByClient(failClient, pendingTx.id, {
+          status: TX_STATUS.FAILED,
+          note: buildTxNote({
+            note: cleanNote || 'BTC transfer failed',
+            toAddress: cleanToAddress,
+            network: 'BTC',
+            idempotencyKey,
+          }),
+        });
+        await failClient.query('COMMIT');
+      } catch (_) {
+        await failClient.query('ROLLBACK');
+      } finally {
+        failClient.release();
+      }
+
+      throw createHttpError('BTC wallet key mismatch', 400);
+    }
+
+    const utxos = await getBtcUtxos(walletRow.address);
+
+    if (!Array.isArray(utxos) || utxos.length === 0) {
+      const failClient = await pool.connect();
+      try {
+        await failClient.query('BEGIN');
+        await updateTransactionRecordByClient(failClient, pendingTx.id, {
+          status: TX_STATUS.FAILED,
+          note: buildTxNote({
+            note: cleanNote || 'BTC transfer failed',
+            toAddress: cleanToAddress,
+            network: 'BTC',
+            idempotencyKey,
+          }),
+        });
+        await failClient.query('COMMIT');
+      } catch (_) {
+        await failClient.query('ROLLBACK');
+      } finally {
+        failClient.release();
+      }
+
+      throw createHttpError('No spendable BTC UTXOs found', 400);
+    }
+
+    const feeRate = await getBtcRecommendedFeeRate();
+    const { selected, total, fee } = selectBtcUtxos(utxos, amountSats, feeRate);
+
+    const change = total - amountSats - fee;
+
+    if (change < 0) {
+      const failClient = await pool.connect();
+      try {
+        await failClient.query('BEGIN');
+        await updateTransactionRecordByClient(failClient, pendingTx.id, {
+          status: TX_STATUS.FAILED,
+          note: buildTxNote({
+            note: cleanNote || 'BTC transfer failed',
+            toAddress: cleanToAddress,
+            network: 'BTC',
+            idempotencyKey,
+          }),
+        });
+        await failClient.query('COMMIT');
+      } catch (_) {
+        await failClient.query('ROLLBACK');
+      } finally {
+        failClient.release();
+      }
+
+      throw createHttpError('Insufficient BTC balance after fee calculation', 400);
+    }
+
+    const psbt = new bitcoin.Psbt({ network: BTC_NETWORK });
+
+    for (const utxo of selected) {
+      psbt.addInput({
+        hash: utxo.txid,
+        index: utxo.vout,
+        witnessUtxo: {
+          script: senderPayment.output,
+          value: safeNumber(utxo.value, 0),
+        },
+      });
+    }
+
     psbt.addOutput({
-      address: walletRow.address,
-      value: change,
+      address: cleanToAddress,
+      value: amountSats,
     });
+
+    const dustLimit = 546;
+
+    if (change >= dustLimit) {
+      psbt.addOutput({
+        address: walletRow.address,
+        value: change,
+      });
+    }
+
+    for (let i = 0; i < selected.length; i += 1) {
+      psbt.signInput(i, keyPair);
+    }
+
+    psbt.finalizeAllInputs();
+
+    const rawTx = psbt.extractTransaction().toHex();
+    const txHash = await broadcastBtcTransaction(rawTx);
+
+    const doneClient = await pool.connect();
+    try {
+      await doneClient.query('BEGIN');
+
+      const latestBalance = await getBtcBalance(walletRow.address);
+      await doneClient.query(
+        `UPDATE public.wallets
+         SET balance = $1
+         WHERE id = $2`,
+        [latestBalance, walletRow.id]
+      );
+
+      const finalTx = await updateTransactionRecordByClient(doneClient, pendingTx.id, {
+        status: TX_STATUS.PENDING,
+        note: buildTxNote({
+          note: cleanNote || 'BTC transfer',
+          toAddress: cleanToAddress,
+          network: 'BTC',
+          txHash,
+          feeText: `${fromBtcSatoshis(fee)} BTC`,
+          idempotencyKey,
+        }),
+      });
+
+      await doneClient.query('COMMIT');
+
+      return {
+        transactionId: finalTx?.id || pendingTx.id,
+        balance: latestBalance,
+        sentAmount: sendValue,
+        asset: 'BTC',
+        network: 'BTC',
+        toAddress: cleanToAddress,
+        txHash,
+        feeBtc: fromBtcSatoshis(fee),
+        status: TX_STATUS.PENDING,
+      };
+    } catch (dbError) {
+      await doneClient.query('ROLLBACK');
+      throw dbError;
+    } finally {
+      doneClient.release();
+    }
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (_) {}
+    throw error;
+  } finally {
+    client.release();
   }
-
-  for (let i = 0; i < selected.length; i += 1) {
-    psbt.signInput(i, keyPair);
-  }
-
-  psbt.finalizeAllInputs();
-
-  const rawTx = psbt.extractTransaction().toHex();
-  const txHash = await broadcastBtcTransaction(rawTx);
-
-  const refreshedWallets = await syncWalletBalances(userId);
-  const refreshedBtcWallet = refreshedWallets.find(
-    (item) => item.network === 'BTC'
-  );
-
-  await createTransactionRecord({
-    userId,
-    type: 'send',
-    amount: sendValue,
-    status: 'pending',
-    note: `${note || 'BTC transfer'} -> ${cleanToAddress} [BTC] tx:${txHash} fee:${fromBtcSatoshis(fee)} BTC`,
-  });
-
-  return {
-    balance: refreshedBtcWallet?.balance ?? 0,
-    sentAmount: sendValue,
-    network: 'BTC',
-    toAddress: cleanToAddress,
-    txHash,
-    feeBtc: fromBtcSatoshis(fee),
-    status: 'pending',
-  };
 }
 
-async function sendAmount(
+async function sendAmount({
   userId,
+  asset,
   amount,
   toAddress,
   note = '',
-  network = 'TRC20'
-) {
-  if (network === 'TRC20') {
-    return sendUSDT_TRC20(userId, toAddress, amount, note);
+  network = 'TRC20',
+  idempotencyKey = '',
+}) {
+  const normalizedNetwork = normalizeNetwork(network);
+  const normalizedAsset = normalizeAsset(asset, normalizedNetwork);
+
+  if (normalizedNetwork === 'TRC20') {
+    return sendUSDT_TRC20({
+      userId,
+      asset: normalizedAsset,
+      amount,
+      toAddress,
+      note,
+      idempotencyKey,
+    });
   }
 
-  if (network === 'ERC20') {
-    return sendUSDT_ERC20(userId, toAddress, amount, note);
+  if (normalizedNetwork === 'ERC20') {
+    return sendUSDT_ERC20({
+      userId,
+      asset: normalizedAsset,
+      amount,
+      toAddress,
+      note,
+      idempotencyKey,
+    });
   }
 
-  if (network === 'BTC') {
-    return sendBTC(userId, toAddress, amount, note);
+  if (normalizedNetwork === 'BTC') {
+    return sendBTC({
+      userId,
+      asset: normalizedAsset,
+      amount,
+      toAddress,
+      note,
+      idempotencyKey,
+    });
   }
 
-  throw new Error('Unsupported network');
+  throw createHttpError('Unsupported network', 400);
 }
 
 async function getBtcTransactions(address) {
@@ -829,14 +1318,22 @@ async function getTransactions(userId) {
      FROM public.transactions
      WHERE user_id = $1
      ORDER BY created_at DESC
-     LIMIT 20`,
+     LIMIT 30`,
     [userId]
   );
 
-  const dbTransactions = dbTransactionsResult.rows.map((tx) => ({
-    ...tx,
-    network: 'internal',
-  }));
+  const dbTransactions = dbTransactionsResult.rows.map((tx) => {
+    let network = 'internal';
+
+    if (String(tx.note || '').includes('[TRC20]')) network = 'TRC20';
+    if (String(tx.note || '').includes('[ERC20]')) network = 'ERC20';
+    if (String(tx.note || '').includes('[BTC]')) network = 'BTC';
+
+    return {
+      ...tx,
+      network,
+    };
+  });
 
   const btcWallet = wallets.find((w) => w.network === 'BTC');
   const btcTransactions = btcWallet

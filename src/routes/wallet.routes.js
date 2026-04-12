@@ -8,18 +8,34 @@ const {
   getTransactionsController,
 } = require('../controllers/wallet.controller');
 
+const {
+  sendLimiter,
+  walletReadLimiter,
+} = require('../middlewares/rateLimiter.middleware');
+
+const {
+  validateSendRequest,
+} = require('../middlewares/validate.middleware');
+
+const {
+  idempotencyMiddleware,
+} = require('../middlewares/idempotency.middleware');
+
 const router = express.Router();
 
-// 🔹 جلب المحافظ (وبيولدهم تلقائي إذا ما موجودين)
-router.get('/wallets', authMiddleware, getBalanceController);
+router.get('/wallets', authMiddleware, walletReadLimiter, getBalanceController);
 
-// 🔹 إنشاء المحافظ يدوي (اختياري)
-router.post('/wallets/create', authMiddleware, createWalletsController);
+router.post('/wallets/create', authMiddleware, walletReadLimiter, createWalletsController);
 
-// 🔹 إرسال رصيد (حاليًا داخلي فقط)
-router.post('/send', authMiddleware, sendController);
+router.post(
+  '/send',
+  authMiddleware,
+  sendLimiter,
+  idempotencyMiddleware,
+  validateSendRequest,
+  sendController
+);
 
-// 🔹 سجل العمليات
-router.get('/transactions', authMiddleware, getTransactionsController);
+router.get('/transactions', authMiddleware, walletReadLimiter, getTransactionsController);
 
 module.exports = router;
