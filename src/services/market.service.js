@@ -1,71 +1,99 @@
 const axios = require('axios');
 const WebSocket = require('ws');
 
-const BINANCE_REST = 'https://api.binance.com';
-const BINANCE_WS = 'wss://stream.binance.com:9443/ws/!ticker@arr';
+const KRAKEN_REST = 'https://api.kraken.com/0/public';
+const KRAKEN_WS = 'wss://ws.kraken.com/v2';
 
 const MAX_COINS = 200;
 const RECONNECT_DELAY = 5000;
 
 let marketMap = new Map();
-let selectedSymbols = new Set();
+let selectedSymbols = [];
+let restPairNames = [];
 let isInitialized = false;
 let isInitializing = false;
 let ws = null;
 let reconnectTimer = null;
 
-function isValidSpotUsdtSymbol(symbolInfo) {
-  if (!symbolInfo) return false;
+function normalizeBaseAsset(base) {
+  const map = {
+    XBT: 'BTC',
+    XDG: 'DOGE',
+  };
 
-  const symbol = symbolInfo.symbol || '';
-
-  if (symbolInfo.status !== 'TRADING') return false;
-  if (symbolInfo.quoteAsset !== 'USDT') return false;
-  if (!symbolInfo.isSpotTradingAllowed) return false;
-
-  // استبعاد أزواج الرافعة/التوكنات الخاصة التي غالبًا تشوّه القائمة
-  const blockedSuffixes = ['UP', 'DOWN', 'BULL', 'BEAR'];
-  if (blockedSuffixes.some((suffix) => symbol.endsWith(suffix + 'USDT'))) {
-    return false;
-  }
-
-  return true;
+  return map[base] || base;
 }
 
-async function fetchTradableUsdtSymbols() {
-  const response = await axios.get(`${BINANCE_REST}/api/v3/exchangeInfo`, {
-    timeout: 15000,
-  });
+function parseWsPair(wsname) {
+  const parts = wsname.split('/');
+  if (parts.length !== 2) return null;
 
-  const symbols = response.data.symbols || [];
+  const base = normalizeBaseAsset(parts[0]);
+  const quote = parts[1];
 
-  return symbols
-    .filter(isValidSpotUsdtSymbol)
-    .map((item) => ({
-      symbol: item.symbol,
-      baseAsset: item.baseAsset,
-      quoteAsset: item.quoteAsset,
-    }));
+  return {
+    wsname,
+    baseAsset: base,
+    quoteAsset: quote,
+  };
 }
 
-async function fetch24hTickers() {
-  const response = await axios.get(`${BINANCE_REST}/api/v3/ticker/24hr`, {
+function toNumber(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+async function fetchTradableUsdtPairs() {
+  const response = await axios.get(`${KRAKEN_REST}/AssetPairs`, {
     timeout: 20000,
   });
 
-  return Array.isArray(response.data) ? response.data : [];
+  const result = response.data?.result || {};
+  const pairs = [];
+
+  for (const [restName, item] of Object.entries(result)) {
+    const wsname = item.wsname;
+
+    if (!wsname || typeof wsname !== 'string') continue;
+    if (!wsname.endsWith('/USDT')) continue;
+
+    const parsed = parseWsPair(wsname);
+    if (!parsed) continue;
+
+    pairs.push({
+      restName,
+      wsname: parsed.wsname,
+      baseAsset: parsed.baseAsset,
+      quoteAsset: parsed.quoteAsset,
+    });
+  }
+
+  return pairs;
 }
 
-function buildCoinFromTicker(meta, ticker) {
-  const lastPrice = Number(ticker.lastPrice || 0);
-  const priceChangePercent = Number(ticker.priceChangePercent || 0);
-  const quoteVolume = Number(ticker.quoteVolume || 0);
+async function fetchTickerSnapshot(pairNames) {
+  if (!pairNames.length) return {};
+
+  const response = await axios.get(`${KRAKEN_REST}/Ticker`, {
+    timeout: 20000,
+    params: {
+      pair: pairNames.join(','),
+    },
+  });
+
+  return response.data?.result || {};
+}
+
+function buildCoinFromSnapshot(meta, ticker) {
+  const lastPrice = toNumber(ticker?.c?.[0]);
+  const priceChangePercent = 0; // Kraken REST ticker ما يعطي 24h % مباشرة بنفس الشكل
+  const quoteVolume = toNumber(ticker?.v?.[1]);
 
   return {
     id: meta.baseAsset.toLowerCase(),
     name: meta.baseAsset,
     symbol: meta.baseAsset,
-    pair: meta.symbol,
+    pair: meta.wsname,
     image: '',
     price: lastPrice,
     priceChange24h: priceChangePercent,
@@ -81,24 +109,26 @@ async function initializeMarketData() {
   isInitializing = true;
 
   try {
-    const tradableSymbols = await fetchTradableUsdtSymbols();
-    const tickerList = await fetch24hTickers();
-
-    const tradableMap = new Map(
-      tradableSymbols.map((item) => [item.symbol, item])
+    const tradablePairs = await fetchTradableUsdtPairs();
+    const snapshot = await fetchTickerSnapshot(
+      tradablePairs.map((p) => p.restName)
     );
 
-    const merged = tickerList
-      .filter((ticker) => tradableMap.has(ticker.symbol))
-      .map((ticker) => {
-        const meta = tradableMap.get(ticker.symbol);
-        return buildCoinFromTicker(meta, ticker);
+    const merged = tradablePairs
+      .map((pair) => {
+        const ticker = snapshot[pair.restName];
+        if (!ticker) return null;
+        return buildCoinFromSnapshot(pair, ticker);
       })
+      .filter(Boolean)
       .sort((a, b) => (b.volume24h || 0) - (a.volume24h || 0))
       .slice(0, MAX_COINS);
 
     marketMap = new Map(merged.map((coin) => [coin.pair, coin]));
-    selectedSymbols = new Set(merged.map((coin) => coin.pair));
+    selectedSymbols = merged.map((coin) => coin.pair);
+    restPairNames = tradablePairs
+      .filter((p) => selectedSymbols.includes(p.wsname))
+      .map((p) => p.restName);
 
     startWebSocket();
     isInitialized = true;
@@ -115,53 +145,70 @@ function startWebSocket() {
     ws = null;
   }
 
-  ws = new WebSocket(BINANCE_WS);
+  ws = new WebSocket(KRAKEN_WS);
 
   ws.on('open', () => {
-    console.log('✅ Binance live market feed connected');
+    console.log('✅ Kraken live market feed connected');
+
+    ws.send(
+      JSON.stringify({
+        method: 'subscribe',
+        params: {
+          channel: 'ticker',
+          symbol: selectedSymbols,
+        },
+      })
+    );
   });
 
   ws.on('message', (raw) => {
     try {
-      const updates = JSON.parse(raw.toString());
+      const msg = JSON.parse(raw.toString());
 
-      if (!Array.isArray(updates)) return;
+      if (msg.channel !== 'ticker') return;
+      if (!Array.isArray(msg.data)) return;
 
-      for (const item of updates) {
-        const pair = item.s;
-
-        if (!selectedSymbols.has(pair)) continue;
+      for (const item of msg.data) {
+        const pair = item.symbol;
+        if (!pair || !marketMap.has(pair)) continue;
 
         const existing = marketMap.get(pair);
-        if (!existing) continue;
+
+        const lastPrice = toNumber(
+          item.last ?? item.last_price ?? existing.price,
+          existing.price
+        );
+
+        const bid = toNumber(item.bid, 0);
+        const ask = toNumber(item.ask, 0);
+        const mid =
+            bid > 0 && ask > 0 ? (bid + ask) / 2 : existing.price;
+
+        const ref = mid > 0 ? mid : existing.price || 1;
+        const derivedChangePercent =
+          ((lastPrice - ref) / ref) * 100;
 
         marketMap.set(pair, {
           ...existing,
-          price: Number(item.c || existing.price || 0), // last price
-          priceChange24h: Number(
-            item.P ?? existing.priceChange24h ?? 0
-          ), // 24h %
-          volume24h: Number(item.q ?? existing.volume24h ?? 0), // quote volume
+          price: lastPrice,
+          priceChange24h: Number.isFinite(derivedChangePercent)
+              ? derivedChangePercent
+              : existing.priceChange24h,
+          volume24h: toNumber(item.volume ?? existing.volume24h, existing.volume24h),
         });
       }
     } catch (error) {
-      console.error('WebSocket parse error:', error.message);
+      console.error('Kraken WebSocket parse error:', error.message);
     }
   });
 
-  ws.on('ping', (data) => {
-    try {
-      ws.pong(data);
-    } catch (_) {}
-  });
-
   ws.on('close', () => {
-    console.warn('⚠️ Binance live market feed disconnected');
+    console.warn('⚠️ Kraken live market feed disconnected');
     scheduleReconnect();
   });
 
   ws.on('error', (error) => {
-    console.error('WebSocket error:', error.message);
+    console.error('Kraken WebSocket error:', error.message);
     try {
       ws.close();
     } catch (_) {}
@@ -173,7 +220,7 @@ function scheduleReconnect() {
 
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    console.log('🔄 Reconnecting Binance live market feed...');
+    console.log('🔄 Reconnecting Kraken live market feed...');
     startWebSocket();
   }, RECONNECT_DELAY);
 }
