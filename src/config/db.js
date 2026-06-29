@@ -70,6 +70,38 @@ async function ensureWalletsSchema() {
       WHERE is_active = TRUE
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.platform_fees (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES public.users(id) ON DELETE SET NULL,
+        operation_type VARCHAR(30) NOT NULL DEFAULT 'swap',
+        provider VARCHAR(50) NOT NULL DEFAULT 'changelly',
+        provider_transaction_id VARCHAR(120),
+        source_asset VARCHAR(20) NOT NULL,
+        source_network VARCHAR(20),
+        target_asset VARCHAR(20) NOT NULL,
+        target_network VARCHAR(20),
+        gross_amount NUMERIC(30, 12) NOT NULL,
+        fee_asset VARCHAR(20) NOT NULL DEFAULT 'USDT',
+        fee_amount NUMERIC(30, 12) NOT NULL,
+        net_amount NUMERIC(30, 12) NOT NULL,
+        status VARCHAR(30) NOT NULL DEFAULT 'quoted',
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS platform_fees_user_created_idx
+      ON public.platform_fees (user_id, created_at DESC)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS platform_fees_status_created_idx
+      ON public.platform_fees (status, created_at DESC)
+    `);
+
     const columnsResult = await client.query(`
       SELECT column_name
       FROM information_schema.columns

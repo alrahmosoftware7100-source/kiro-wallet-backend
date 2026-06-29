@@ -36,3 +36,29 @@ CREATE TABLE IF NOT EXISTS trusted_recovery_addresses (
 CREATE INDEX IF NOT EXISTS trusted_recovery_addresses_lookup_idx
 ON trusted_recovery_addresses (network, address_normalized)
 WHERE is_active = TRUE;
+
+CREATE TABLE IF NOT EXISTS platform_fees (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    operation_type VARCHAR(30) NOT NULL DEFAULT 'swap',
+    provider VARCHAR(50) NOT NULL DEFAULT 'changelly',
+    provider_transaction_id VARCHAR(120),
+    source_asset VARCHAR(20) NOT NULL,
+    source_network VARCHAR(20),
+    target_asset VARCHAR(20) NOT NULL,
+    target_network VARCHAR(20),
+    gross_amount NUMERIC(30, 12) NOT NULL,
+    fee_asset VARCHAR(20) NOT NULL DEFAULT 'USDT',
+    fee_amount NUMERIC(30, 12) NOT NULL,
+    net_amount NUMERIC(30, 12) NOT NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'quoted',
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS platform_fees_user_created_idx
+ON platform_fees (user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS platform_fees_status_created_idx
+ON platform_fees (status, created_at DESC);
