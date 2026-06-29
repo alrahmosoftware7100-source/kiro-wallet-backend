@@ -8,14 +8,20 @@ const PORT = Number(process.env.PORT) || 5000;
 
 async function startServer() {
   try {
-    await pool.query('SELECT NOW()');
-    console.log('Database connected successfully');
-
     const server = http.createServer(app);
 
     server.listen(PORT, '0.0.0.0', () => {
       console.log(`Server running on http://localhost:${PORT}`);
     });
+
+    pool
+      .query('SELECT NOW()')
+      .then(() => {
+        console.log('Database connected successfully');
+      })
+      .catch((error) => {
+        console.error('Database connection check failed:', error.message);
+      });
 
     server.on('error', (error) => {
       console.error('Server error:', error);
