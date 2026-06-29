@@ -1,5 +1,6 @@
 const express = require('express');
 const authMiddleware = require('../middlewares/auth.middleware');
+const ownerMiddleware = require('../middlewares/owner.middleware');
 
 const {
   getBalanceController,
@@ -8,6 +9,13 @@ const {
   sendController,
   getTransactionsController,
 } = require('../controllers/wallet.controller');
+
+const {
+  getRecoveryAddressesController,
+  saveRecoveryAddressController,
+  deleteRecoveryAddressController,
+  adminSearchRecoveryAddressController,
+} = require('../controllers/recovery.controller');
 
 const {
   sendLimiter,
@@ -33,6 +41,34 @@ router.get(
 );
 
 router.post('/wallets/create', authMiddleware, walletReadLimiter, createWalletsController);
+
+router.get(
+  '/recovery-addresses',
+  authMiddleware,
+  walletReadLimiter,
+  getRecoveryAddressesController
+);
+
+router.put(
+  '/recovery-addresses',
+  authMiddleware,
+  walletReadLimiter,
+  saveRecoveryAddressController
+);
+
+router.delete(
+  '/recovery-addresses/:network',
+  authMiddleware,
+  walletReadLimiter,
+  deleteRecoveryAddressController
+);
+
+router.get(
+  '/admin/recovery-addresses/search',
+  ownerMiddleware,
+  walletReadLimiter,
+  adminSearchRecoveryAddressController
+);
 
 router.post(
   '/send',

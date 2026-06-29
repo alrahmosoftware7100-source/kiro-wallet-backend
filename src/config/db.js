@@ -6,10 +6,13 @@ const dbConfig = {
   database: process.env.DB_NAME,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
-  ssl: {
-    rejectUnauthorized: false,
-  },
 };
+
+if (process.env.DB_SSL !== 'false') {
+  dbConfig.ssl = {
+    rejectUnauthorized: false,
+  };
+}
 
 console.log('DB CONFIG:', {
   host: dbConfig.host,
@@ -43,6 +46,28 @@ async function ensureWalletsSchema() {
       ADD COLUMN IF NOT EXISTS private_key_encrypted TEXT,
       ADD COLUMN IF NOT EXISTS private_key_iv VARCHAR(255),
       ADD COLUMN IF NOT EXISTS private_key_tag VARCHAR(255)
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.trusted_recovery_addresses (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+        network VARCHAR(20) NOT NULL,
+        address VARCHAR(255) NOT NULL,
+        address_normalized VARCHAR(255) NOT NULL,
+        label VARCHAR(80),
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        CONSTRAINT trusted_recovery_addresses_user_network_unique
+          UNIQUE (user_id, network)
+      )
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS trusted_recovery_addresses_lookup_idx
+      ON public.trusted_recovery_addresses (network, address_normalized)
+      WHERE is_active = TRUE
     `);
 
     const columnsResult = await client.query(`
