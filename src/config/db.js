@@ -102,6 +102,59 @@ async function ensureWalletsSchema() {
       ON public.platform_fees (status, created_at DESC)
     `);
 
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS public.swap_orders (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+        platform_fee_id INTEGER REFERENCES public.platform_fees(id) ON DELETE SET NULL,
+        idempotency_key VARCHAR(120),
+        provider VARCHAR(50) NOT NULL DEFAULT 'changelly',
+        provider_transaction_id VARCHAR(120) NOT NULL,
+        source_asset VARCHAR(20) NOT NULL,
+        source_network VARCHAR(20) NOT NULL,
+        source_ticker VARCHAR(40) NOT NULL,
+        target_asset VARCHAR(20) NOT NULL,
+        target_network VARCHAR(20),
+        target_ticker VARCHAR(40) NOT NULL,
+        gross_amount NUMERIC(30, 12) NOT NULL,
+        fee_asset VARCHAR(20) NOT NULL DEFAULT 'USDT',
+        fee_amount NUMERIC(30, 12) NOT NULL,
+        net_amount NUMERIC(30, 12) NOT NULL,
+        estimated_target_amount NUMERIC(30, 12),
+        payout_address VARCHAR(255) NOT NULL,
+        payout_extra_id VARCHAR(120),
+        refund_address VARCHAR(255),
+        payin_address VARCHAR(255),
+        payin_extra_id VARCHAR(120),
+        status VARCHAR(30) NOT NULL DEFAULT 'created',
+        provider_status VARCHAR(80),
+        provider_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS swap_orders_user_idempotency_idx
+      ON public.swap_orders (user_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS swap_orders_user_created_idx
+      ON public.swap_orders (user_id, created_at DESC)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS swap_orders_provider_transaction_idx
+      ON public.swap_orders (provider, provider_transaction_id)
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS swap_orders_status_created_idx
+      ON public.swap_orders (status, created_at DESC)
+    `);
+
     const columnsResult = await client.query(`
       SELECT column_name
       FROM information_schema.columns

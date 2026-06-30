@@ -1,4 +1,5 @@
 const pool = require('../config/db');
+const { isChangellyConfigured } = require('./changelly.service');
 
 const DEFAULT_SWAP_PROVIDER = 'changelly';
 const DEFAULT_SWAP_FEE_USDT = 0.25;
@@ -36,14 +37,20 @@ function getSwapFeeSettings() {
   );
 
   const provider = process.env.SWAP_PROVIDER || DEFAULT_SWAP_PROVIDER;
-  const providerConfigured = Boolean(
-    process.env.CHANGELLY_API_KEY && process.env.CHANGELLY_API_SECRET
+  const providerConfigured = isChangellyConfigured();
+  const autoPaymentEnabled = process.env.ENABLE_SWAP_AUTO_PAYMENT === 'true';
+  const feeCollectionConfigured = Boolean(
+    process.env.PLATFORM_FEE_TRC20_ADDRESS ||
+      process.env.PLATFORM_FEE_ERC20_ADDRESS
   );
 
   return {
     provider,
     providerConfigured,
+    autoPaymentEnabled,
+    feeCollectionConfigured,
     noLeverage: true,
+    supportedSourceNetworks: ['TRC20', 'ERC20'],
     serviceFee: {
       type: 'fixed',
       asset: 'USDT',
@@ -121,8 +128,8 @@ async function recordPlatformFee({
   netAmount,
   status = 'quoted',
   metadata = {},
-}) {
-  const result = await pool.query(
+}, db = pool) {
+  const result = await db.query(
     `INSERT INTO public.platform_fees
        (user_id, provider, provider_transaction_id, source_asset, source_network,
         target_asset, target_network, gross_amount, fee_asset, fee_amount,
