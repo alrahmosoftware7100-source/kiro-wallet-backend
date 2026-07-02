@@ -20,7 +20,7 @@
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="description" content="KIRO Wallet lets users open a secure digital wallet, view live crypto prices, and manage wallet activity from the web or mobile app.">
-  <meta name="theme-color" content="#2563EB">
+  <meta name="theme-color" content="#111827">
   <meta name="robots" content="index, follow">
 
   <meta property="og:title" content="KIRO Wallet">
@@ -42,8 +42,41 @@
 
   <title>KIRO Wallet</title>
   <link rel="manifest" href="manifest.json">
+  <style>
+    html,
+    body {
+      height: 100%;
+      margin: 0;
+      background: #111827;
+    }
+
+    #kiro-loading {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #111827;
+    }
+
+    #kiro-loading img {
+      width: min(76vw, 560px);
+      max-height: 72vh;
+      object-fit: contain;
+    }
+
+    #kiro-loading.fade-out {
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 260ms ease;
+    }
+  </style>
 </head>
 <body>
+  <div id="kiro-loading" aria-label="KIRO Wallet loading">
+    <img src="assets/assets/images/logo.png" alt="KIRO Wallet">
+  </div>
   <noscript>
     <main>
       <h1>KIRO Wallet</h1>
@@ -59,6 +92,19 @@
     For more details:
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
+  <script>
+    function hideKiroLoading() {
+      var loader = document.getElementById('kiro-loading');
+      if (!loader) return;
+      loader.classList.add('fade-out');
+      window.setTimeout(function () {
+        loader.remove();
+      }, 320);
+    }
+
+    window.addEventListener('flutter-first-frame', hideKiroLoading);
+    window.setTimeout(hideKiroLoading, 12000);
+  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
